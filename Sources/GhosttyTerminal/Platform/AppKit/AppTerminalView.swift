@@ -23,6 +23,20 @@
         var pointer: PointerSelectionState = .init()
         var focusBridge: FocusBridgeState = .init()
 
+        /// Host first-refusal hook for key-equivalent events. The embedding app
+        /// (btty) sets this to claim specific chords (e.g. ctrl+hjkl directional
+        /// pane nav) BEFORE libghostty would translate them into PTY bytes.
+        /// Consulted at the top of `performKeyEquivalent(with:)`: a `true`
+        /// return means the host handled the event, so the surface neither
+        /// dispatches `keyDown` nor sends anything to the PTY — no spurious
+        /// control byte leaks to the shell. `false` (the default-nil behavior)
+        /// leaves libghostty's normal key handling untouched, so a passthrough
+        /// pane (e.g. one running Neovim) still receives the chord. The host
+        /// decides which chords to claim; libghostty stays policy-free.
+        /// `@MainActor` (the class already is) so an embedder under strict
+        /// concurrency can store a closure that touches MainActor state.
+        open var hostKeyEquivalentHandler: (@MainActor (NSEvent) -> Bool)?
+
         open weak var delegate: (any TerminalSurfaceViewDelegate)? {
             get { core.delegate }
             set { core.delegate = newValue }

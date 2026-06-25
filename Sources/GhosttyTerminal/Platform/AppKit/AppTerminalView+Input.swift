@@ -29,6 +29,15 @@
         override open func performKeyEquivalent(with event: NSEvent) -> Bool {
             guard event.type == .keyDown else { return false }
             guard window?.firstResponder === self else { return false }
+
+            // Host first refusal (btty pane nav): if the embedding app claims
+            // this chord, consume it here — never reach `keyDown` or the PTY,
+            // so no control byte leaks to the shell. Runs before the `surface`
+            // guard so a claim works even mid-surface-rebuild.
+            if hostKeyEquivalentHandler?(event) == true {
+                return true
+            }
+
             guard let surface else { return false }
 
             if keyIsBinding(event, on: surface) {

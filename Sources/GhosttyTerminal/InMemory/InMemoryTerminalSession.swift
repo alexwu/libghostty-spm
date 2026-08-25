@@ -14,6 +14,13 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
     private let resizeLock = NSLock()
     private let surfaceAccess: InMemoryTerminalSurfaceAccess
     private var lastResize: InMemoryTerminalViewport?
+    // rb1d.1 debounce state. dispatchResize is reachable from
+    // receiveResizeCallback (a C callback with no single-thread guarantee),
+    // so BOTH the pending geometry and the timer live under debounceLock.
+    private let debounceQueue = DispatchQueue(label: "in-memory-resize-debounce")
+    private let debounceLock = NSLock()
+    private var debounceTimer: DispatchSourceTimer?
+    private var pendingDebouncedResize: InMemoryTerminalViewport?
     private let writeHandler: @Sendable (Data) -> Void
     private let resizeHandler: @Sendable (InMemoryTerminalViewport) -> Void
 
@@ -31,14 +38,32 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
     /// repaint that re-wraps its content.
     public let suppressesPixelOnlyResizes: Bool
 
+    /// Trailing-edge quiet-period debounce for resize delivery, in
+    /// milliseconds (btty `lulu-code-rb1d.1`).
+    ///
+    /// `0` (the default) is off: every countable geometry dispatches
+    /// synchronously, one per coalesce — today's behavior. `> 0`: every
+    /// countable geometry re-arms a quiet timer; only the LATEST geometry is
+    /// delivered when the quiet period elapses. No intermediate is ever
+    /// delivered late; the final size always wins. Collapses a continuous
+    /// geometry sweep (animated sidebar toggle, divider drag, window resize)
+    /// into a single resize as far as the shell can tell.
+    ///
+    /// Sits downstream of the dedup gates: dedup decides whether a geometry
+    /// counts, the debounce decides when the latest countable one is
+    /// delivered. Suppressed pixel-only updates never reach it.
+    public let resizeDebounceMilliseconds: Int
+
     public init(
         write: @escaping @Sendable (Data) -> Void,
         resize: @escaping @Sendable (InMemoryTerminalViewport) -> Void,
-        suppressesPixelOnlyResizes: Bool = false
+        suppressesPixelOnlyResizes: Bool = false,
+        resizeDebounceMilliseconds: Int = 0
     ) {
         writeHandler = write
         resizeHandler = resize
         self.suppressesPixelOnlyResizes = suppressesPixelOnlyResizes
+        self.resizeDebounceMilliseconds = resizeDebounceMilliseconds
         surfaceAccess = InMemoryTerminalSurfaceAccess(
             write: Self.writeToSurface,
             processExit: Self.reportProcessExit
@@ -49,6 +74,7 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
         write: @escaping @Sendable (Data) -> Void,
         resize: @escaping @Sendable (InMemoryTerminalViewport) -> Void,
         suppressesPixelOnlyResizes: Bool = false,
+        resizeDebounceMilliseconds: Int = 0,
         surfaceWrite: @escaping InMemoryTerminalSurfaceAccess.Write,
         processExit: @escaping InMemoryTerminalSurfaceAccess.ProcessExit =
             InMemoryTerminalSession.reportProcessExit
@@ -56,6 +82,7 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
         writeHandler = write
         resizeHandler = resize
         self.suppressesPixelOnlyResizes = suppressesPixelOnlyResizes
+        self.resizeDebounceMilliseconds = resizeDebounceMilliseconds
         surfaceAccess = InMemoryTerminalSurfaceAccess(
             write: surfaceWrite,
             processExit: processExit
@@ -326,11 +353,39 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
 
         resizeLock.unlock()
 
-        TerminalDebugLog.log(
-            .metrics,
-            "resize dispatched cols=\(mergedResize.columns) rows=\(mergedResize.rows) pixels=\(mergedResize.widthPixels)x\(mergedResize.heightPixels) cell=\(mergedResize.cellWidthPixels)x\(mergedResize.cellHeightPixels)"
-        )
-        resizeHandler(mergedResize)
+        if resizeDebounceMilliseconds <= 0 {
+            TerminalDebugLog.log(
+                .metrics,
+                "resize dispatched cols=\(mergedResize.columns) rows=\(mergedResize.rows) pixels=\(mergedResize.widthPixels)x\(mergedResize.heightPixels) cell=\(mergedResize.cellWidthPixels)x\(mergedResize.cellHeightPixels)"
+            )
+            resizeHandler(mergedResize)
+            return
+        }
+
+        // Trailing-edge debounce (see `resizeDebounceMilliseconds`): park the
+        // latest countable geometry and re-arm the quiet timer; delivery
+        // happens on `debounceQueue` when the quiet period elapses.
+        debounceLock.lock()
+        pendingDebouncedResize = mergedResize
+        debounceTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: debounceQueue)
+        timer.schedule(deadline: .now() + .milliseconds(resizeDebounceMilliseconds))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.debounceLock.lock()
+            let pending = self.pendingDebouncedResize
+            self.pendingDebouncedResize = nil
+            self.debounceLock.unlock()
+            guard let pending else { return }
+            TerminalDebugLog.log(
+                .metrics,
+                "resize debounced cols=\(pending.columns) rows=\(pending.rows) pixels=\(pending.widthPixels)x\(pending.heightPixels) cell=\(pending.cellWidthPixels)x\(pending.cellHeightPixels)"
+            )
+            self.resizeHandler(pending)
+        }
+        debounceTimer = timer
+        debounceLock.unlock()
+        timer.resume()
     }
 
     private func mergedResize(_ resize: InMemoryTerminalViewport) -> InMemoryTerminalViewport {

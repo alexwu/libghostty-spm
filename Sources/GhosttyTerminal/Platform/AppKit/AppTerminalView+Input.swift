@@ -184,6 +184,14 @@
                 pointer.pendingSelectionMenuPoint = menuPoint
                 return
             }
+            // Host-widened seam (lulu-code-ehxg.1.1): no selection hit, but
+            // the host wants a menu anyway — unless the program is consuming
+            // mouse events. Same pending-point path as a selection hit, so
+            // rightMouseUp pops the one menu source.
+            if wantsContextMenuWithoutSelection, !isMouseCaptured {
+                pointer.pendingSelectionMenuPoint = CGPoint(x: x, y: y)
+                return
+            }
             surface?.sendMouseButton(
                 state: GHOSTTY_MOUSE_PRESS,
                 button: GHOSTTY_MOUSE_RIGHT,
@@ -209,10 +217,16 @@
 
         override open func menu(for event: NSEvent) -> NSMenu? {
             let (x, y) = mousePoint(from: event)
-            guard selectionMenuPoint(at: CGPoint(x: x, y: y)) != nil else {
-                return super.menu(for: event)
+            if selectionMenuPoint(at: CGPoint(x: x, y: y)) != nil {
+                return selectionContextMenu()
             }
-            return selectionContextMenu()
+            // Same widening as rightMouseDown (lulu-code-ehxg.1.1), so the
+            // defensive AppKit path (context-menu key, accessibility) agrees
+            // with the primary one.
+            if wantsContextMenuWithoutSelection, !isMouseCaptured {
+                return selectionContextMenu()
+            }
+            return super.menu(for: event)
         }
 
         override open func otherMouseDown(with event: NSEvent) {

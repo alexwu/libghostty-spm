@@ -234,6 +234,13 @@ public final class TerminalSurface {
         return result
     }
 
+    // MARK: - Mouse Capture
+
+    var isMouseCaptured: Bool {
+        guard let s = surface else { return false }
+        return ghostty_surface_mouse_captured(s)
+    }
+
     func readSelection() -> String? {
         readSelectionResult()?.text
     }

@@ -39,6 +39,19 @@
         /// concurrency can store a closure that touches MainActor state.
         open var hostKeyEquivalentHandler: (@MainActor (NSEvent) -> Bool)?
 
+        /// Host-widened right-click seam (btty `lulu-code-ehxg.1.1`): when
+        /// true, a right-click with no selection hit routes to the same
+        /// `pendingSelectionMenuPoint` → `selectionContextMenu()` path a
+        /// selection right-click uses — unless the running program has mouse
+        /// reporting active (`isMouseCaptured`), preserving nvim/htop
+        /// right-click behavior. Default false = upstream behavior (forward
+        /// the press to the PTY).
+        open var wantsContextMenuWithoutSelection = false
+
+        /// Whether the surface currently has a selection (public twin of the
+        /// surface query, for host menu-item enable-state gating).
+        public var hasSelection: Bool { surface?.hasSelection() == true }
+
         open weak var delegate: (any TerminalSurfaceViewDelegate)? {
             get { core.delegate }
             set { core.delegate = newValue }
